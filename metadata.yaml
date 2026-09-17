@@ -1,0 +1,7 @@
+name: astrbot_plugin_miyoushe_sign # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
+display_name: 米游社每日签到 # 用于展示的名字
+desc: 每天自动在米游社进行每日签到。支持米游社社区签到（大别野等板块）以及原神、崩坏：星穹铁道、绝区零、崩坏3、未定事件簿、崩坏学园2 游戏签到。
+version: v1.1.0 # 插件版本号
+author: AstrBot Developer # 作者
+repo: https://github.com/lango578/astrbot_plugin_miyoushe_sign # 插件的仓库地址
+short_desc: 每天自动在米游社进行每日签到
