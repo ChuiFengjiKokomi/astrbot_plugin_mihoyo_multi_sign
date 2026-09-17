@@ -1,0 +1,1 @@
+# astrbot_plugin_miyoushe_multi_sign
