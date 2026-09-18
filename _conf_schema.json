@@ -9,6 +9,17 @@
     "type": "bool",
     "default": true
   },
+  "enable_community_sign": {
+    "description": "启用米游社社区签到",
+    "type": "bool",
+    "default": true
+  },
+  "community_forums": {
+    "description": "社区签到板块 gids 列表（5=大别野）",
+    "type": "list",
+    "default": ["5"],
+    "editor_mode": true
+  },
   "games": {
     "description": "自动签到的游戏",
     "type": "object",

@@ -26,6 +26,9 @@ from astrbot.api.star import Context, Star, StarTools, register
 TAKUMI_API = "https://api-takumi.mihoyo.com"
 ZZZ_API = "https://act-nap-api.mihoyo.com"
 ROLES_URL = f"{TAKUMI_API}/binding/api/getUserGameRolesByCookie"
+BOARDS_API = "https://bbs-api.miyoushe.com"
+BBS_SIGN_URL = f"{BOARDS_API}/apihub/app/api/signIn"
+COMMUNITY_DS_SALT = "t0qEgfub6cvueAPgR5m9aQWWVciEer7v"
 PASSPORT_API = "https://passport-api.miyoushe.com"
 QR_CREATE_URL = f"{PASSPORT_API}/account/ma-cn-passport/web/createQRLogin"
 QR_STATUS_URL = f"{PASSPORT_API}/account/ma-cn-passport/web/queryQRLoginStatus"
@@ -73,6 +76,20 @@ def cookie_value(cookie: str, *keys: str) -> str:
     return next((pairs[key] for key in keys if pairs.get(key)), "")
 
 
+def build_stoken_cookie(cookie: str) -> str:
+    """Extract the App credentials required by the community API."""
+    cookie = clean_cookie(cookie)
+    uid = cookie_value(cookie, "stuid", "stuid_v2", "account_id", "account_id_v2", "ltuid", "ltuid_v2", "login_uid")
+    stoken = cookie_value(cookie, "stoken", "stoken_v2")
+    mid = cookie_value(cookie, "mid", "mid_v2", "account_mid_v2", "ltmid_v2")
+    if not uid or not stoken:
+        return ""
+    parts = [f"stuid={uid}", f"stoken={stoken}"]
+    if mid:
+        parts.append(f"mid={mid}")
+    return ";".join(parts)
+
+
 def assemble_cookie(set_cookies: list[str]) -> str:
     """Build a request Cookie value from one or more Set-Cookie headers."""
     pairs: dict[str, str] = {}
@@ -87,6 +104,15 @@ def ds_v1(salt: str) -> str:
     timestamp = str(int(time.time()))
     nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
     digest = hashlib.md5(f"salt={salt}&t={timestamp}&r={nonce}".encode("utf-8")).hexdigest()
+    return f"{timestamp},{nonce},{digest}"
+
+
+def ds_v2(salt: str, *, query: str = "", body: str = "") -> str:
+    timestamp = str(int(time.time()))
+    nonce = str(random.randint(100001, 200000))
+    digest = hashlib.md5(
+        f"salt={salt}&t={timestamp}&r={nonce}&b={body}&q={query}".encode("utf-8")
+    ).hexdigest()
     return f"{timestamp},{nonce},{digest}"
 
 
@@ -118,7 +144,7 @@ class UserStore:
                 logger.error(f"米游社签到：保存用户数据失败：{exc}")
 
 
-@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.0.0")
+@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.2.0")
 class MiyousheMultiSignPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -233,6 +259,71 @@ class MiyousheMultiSignPlugin(Star):
                 if attempt + 1 < retries:
                     await asyncio.sleep(attempt + 1)
         raise RuntimeError(last_error)
+
+    def _community_headers(self, cookie: str, device_id: str, body: str) -> dict[str, str]:
+        return {
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json; charset=UTF-8",
+            "Cookie": cookie,
+            "DS": ds_v2(COMMUNITY_DS_SALT, body=body),
+            "Referer": "https://app.mihoyo.com",
+            "User-Agent": "okhttp/4.9.3",
+            "x-rpc-app_version": str(self.config.get("app_version", "2.106.2")),
+            "x-rpc-channel": "miyousheluodi",
+            "x-rpc-client_type": "2",
+            "x-rpc-csm_source": "home",
+            "x-rpc-device_id": device_id,
+            "x-rpc-device_model": "Mi 6",
+            "x-rpc-device_name": "Xiaomi MI 6",
+            "x-rpc-h265_supported": "1",
+            "x-rpc-sys_version": "12",
+            "x-rpc-verify_key": QR_APP_ID,
+        }
+
+    async def _community_sign(self, account: dict[str, Any]) -> list[str]:
+        """Sign the configured community boards for one bound account."""
+        if not self.config.get("enable_community_sign", True):
+            return []
+        cookie = build_stoken_cookie(str(account.get("cookie", "")))
+        if not cookie:
+            return ["【大别野】Cookie 缺少 stuid/stoken，无法进行社区签到"]
+        forums = self.config.get("community_forums", ["5"])
+        if not isinstance(forums, (list, tuple)):
+            forums = ["5"]
+        device_id = str(account.setdefault("community_device_id", uuid.uuid4()))
+        names = {"5": "大别野", "2": "原神", "6": "崩坏：星穹铁道", "1": "崩坏3", "8": "绝区零", "4": "未定事件簿", "3": "崩坏学园2"}
+        lines: list[str] = []
+        for raw_gid in forums:
+            gid = str(raw_gid).strip()
+            if not gid:
+                continue
+            body = json.dumps({"gids": gid}, separators=(",", ":"))
+            try:
+                session = await self._http()
+                async with session.post(
+                    BBS_SIGN_URL,
+                    headers=self._community_headers(cookie, device_id, body),
+                    data=body,
+                ) as response:
+                    result = await response.json(content_type=None)
+            except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
+                lines.append(f"【{names.get(gid, f'板块{gid}')}】社区签到请求失败：{exc}")
+                continue
+            code = result.get("retcode")
+            name = names.get(gid, f"板块{gid}")
+            message = str(result.get("message") or "")
+            if code == 0:
+                lines.append(f"【{name}】社区签到成功")
+            elif code == -5003:
+                lines.append(f"【{name}】今日已签到")
+            elif code == 1034:
+                lines.append(f"【{name}】触发验证码，请稍后在米游社手动签到")
+            elif code in (-100, 1008, 10103, 10104):
+                lines.append(f"【{name}】登录失效，请重新扫码或绑定 Cookie")
+            else:
+                lines.append(f"【{name}】签到失败：{message or code}")
+            await asyncio.sleep(random.uniform(1, 2))
+        return lines
 
     def _passport_headers(self, device_id: str) -> dict[str, str]:
         """Headers required by the MiHoYo web QR-login endpoints."""
@@ -445,6 +536,10 @@ class MiyousheMultiSignPlugin(Star):
         cookie = account.get("cookie", "")
         cached_roles = account.setdefault("roles", {})
         lines: list[str] = []
+        try:
+            lines.extend(await self._community_sign(account))
+        except Exception as exc:
+            lines.append(f"【大别野】社区签到异常：{exc}")
         for biz in games:
             try:
                 roles, error = await self._roles(cookie, biz)
@@ -657,3 +752,16 @@ class MiyousheMultiSignPlugin(Star):
                     await self.context.send_message(user["umo"], MessageChain().message(text))
                 except Exception as exc:
                     logger.warning(f"米游社签到结果推送失败：{exc}")
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("米游社全部签到", alias={"mys全部签到"})
+    async def sign_all(self, event: AstrMessageEvent):
+        """Allow an administrator to run every bound account's sign-in now."""
+        yield event.plain_result("正在为所有已绑定账号执行签到，请稍候…")
+        try:
+            await self._auto_sign_all()
+        except Exception as exc:
+            logger.error(f"米游社全部签到失败：{exc}")
+            yield event.plain_result(f"全部签到失败：{exc}")
+            return
+        yield event.plain_result("所有账号签到任务已完成，结果已按绑定会话推送。")
