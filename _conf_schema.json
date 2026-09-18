@@ -1,47 +1,41 @@
 {
-    "cookie": {
-        "description": "米游社 Cookie",
-        "type": "text",
-        "hint": "必填。从米游社 App 或网页登录后复制完整 Cookie。包含 stuid/stoken 才能签到社区板块；浏览器 Cookie 可签到游戏。",
-        "obvious_hint": true
-    },
-    "enable_community_sign": {
-        "description": "启用米游社社区每日签到",
-        "type": "bool",
-        "default": true
-    },
-    "community_forums": {
-        "description": "社区签到板块 gids 列表",
-        "type": "list",
-        "hint": "5=大别野, 2=原神, 6=崩坏：星穹铁道, 1=崩坏3, 8=绝区零, 4=未定事件簿, 3=崩坏学园2",
-        "default": ["5"],
-        "editor_mode": true
-    },
-    "enable_game_sign": {
-        "description": "启用游戏签到（原神/星穹铁道/绝区零等）",
-        "type": "bool",
-        "default": false
-    },
-    "games": {
-        "description": "启用的游戏 key 列表",
-        "type": "list",
-        "hint": "可选：genshin / starrail / zzz / honkai3rd / tears / honkai2",
-        "default": ["genshin", "starrail", "zzz"],
-        "editor_mode": true
-    },
-    "auto_sign_enable": {
-        "description": "每天自动签到",
-        "type": "bool",
-        "default": true
-    },
-    "auto_sign_time": {
-        "description": "每天自动签到时间（24小时制，服务器时区）",
-        "type": "string",
-        "default": "09:00"
-    },
-    "push_result": {
-        "description": "自动签到完成后推送到已绑定的会话",
-        "type": "bool",
-        "default": false
+  "sign_time": {
+    "description": "每日自动签到时间（北京时间，HH:MM）",
+    "type": "string",
+    "default": "09:00"
+  },
+  "push_result": {
+    "description": "自动签到完成后推送给各账号的绑定会话",
+    "type": "bool",
+    "default": true
+  },
+  "games": {
+    "description": "自动签到的游戏",
+    "type": "object",
+    "items": {
+      "hk4e_cn": {"description": "原神", "type": "bool", "default": true},
+      "hkrpg_cn": {"description": "崩坏：星穹铁道", "type": "bool", "default": true},
+      "nap_cn": {"description": "绝区零", "type": "bool", "default": true},
+      "bh3_cn": {"description": "崩坏3", "type": "bool", "default": true},
+      "nxx_cn": {"description": "未定事件簿", "type": "bool", "default": false},
+      "bh2_cn": {"description": "崩坏学园2", "type": "bool", "default": false}
     }
+  },
+  "web_ds_salt": {
+    "description": "游戏签到 DS 盐（米游社接口更新时才需修改）",
+    "type": "string",
+    "default": "G1ktdwFL4IyGkHuuWSmz0wUe9Db9scyK",
+    "invisible": true
+  },
+  "app_version": {
+    "description": "米游社 App 版本（接口更新时才需修改）",
+    "type": "string",
+    "default": "2.106.2",
+    "invisible": true
+  },
+  "api_retries": {
+    "description": "临时网络失败时的重试次数",
+    "type": "int",
+    "default": 2
+  }
 }
