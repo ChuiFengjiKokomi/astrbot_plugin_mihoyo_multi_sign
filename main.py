@@ -11,6 +11,7 @@ import random
 import re
 import string
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,6 +26,12 @@ from astrbot.api.star import Context, Star, StarTools, register
 TAKUMI_API = "https://api-takumi.mihoyo.com"
 ZZZ_API = "https://act-nap-api.mihoyo.com"
 ROLES_URL = f"{TAKUMI_API}/binding/api/getUserGameRolesByCookie"
+PASSPORT_API = "https://passport-api.miyoushe.com"
+QR_CREATE_URL = f"{PASSPORT_API}/account/ma-cn-passport/web/createQRLogin"
+QR_STATUS_URL = f"{PASSPORT_API}/account/ma-cn-passport/web/queryQRLoginStatus"
+COOKIE_TOKEN_URL = f"{TAKUMI_API}/auth/api/getCookieAccountInfoBySToken"
+LTOKEN_URL = f"{TAKUMI_API}/auth/api/getLTokenBySToken"
+QR_APP_ID = "bll8iq97cem8"
 USER_AGENT = (
     "Mozilla/5.0 (Linux; Android 12; Unspecified Device) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 "
@@ -64,6 +71,16 @@ def cookie_value(cookie: str, *keys: str) -> str:
         if sep:
             pairs[key] = value
     return next((pairs[key] for key in keys if pairs.get(key)), "")
+
+
+def assemble_cookie(set_cookies: list[str]) -> str:
+    """Build a request Cookie value from one or more Set-Cookie headers."""
+    pairs: dict[str, str] = {}
+    for item in set_cookies:
+        key, separator, value = item.split(";", 1)[0].strip().partition("=")
+        if separator:
+            pairs[key.strip()] = value.strip()
+    return "; ".join(f"{key}={value}" for key, value in pairs.items())
 
 
 def ds_v1(salt: str) -> str:
@@ -116,6 +133,7 @@ class MiyousheMultiSignPlugin(Star):
         self.store = UserStore(os.path.join(self.data_dir, "users.json"))
         self.session: aiohttp.ClientSession | None = None
         self.schedule_task: asyncio.Task | None = None
+        self.qr_tasks: dict[str, asyncio.Task] = {}
         self.sign_lock = asyncio.Lock()
 
     @filter.on_astrbot_loaded()
@@ -127,6 +145,12 @@ class MiyousheMultiSignPlugin(Star):
     async def terminate(self):
         if self.schedule_task:
             self.schedule_task.cancel()
+        tasks = list(self.qr_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self.qr_tasks.clear()
         if self.session and not self.session.closed:
             await self.session.close()
 
@@ -210,6 +234,70 @@ class MiyousheMultiSignPlugin(Star):
                     await asyncio.sleep(attempt + 1)
         raise RuntimeError(last_error)
 
+    def _passport_headers(self, device_id: str) -> dict[str, str]:
+        """Headers required by the MiHoYo web QR-login endpoints."""
+        version = str(self.config.get("app_version", "2.106.2"))
+        return {
+            "Accept": "application/json, text/plain, */*",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT.format(version=version),
+            "x-rpc-app_id": QR_APP_ID,
+            "x-rpc-client_type": "4",
+            "x-rpc-device_id": device_id,
+        }
+
+    async def _create_qr_login(self, device_id: str) -> tuple[str, str]:
+        session = await self._http()
+        async with session.post(QR_CREATE_URL, json={}, headers=self._passport_headers(device_id)) as response:
+            raw = await response.text()
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"二维码接口返回了非 JSON 内容（HTTP {response.status}）") from exc
+        if result.get("retcode") != 0:
+            raise RuntimeError(str(result.get("message") or f"错误码 {result.get('retcode')}"))
+        data = result.get("data") or {}
+        url, ticket = str(data.get("url") or ""), str(data.get("ticket") or "")
+        if not url or not ticket:
+            raise RuntimeError("二维码接口未返回有效的 url 或 ticket")
+        return url, ticket
+
+    async def _query_qr_login(self, ticket: str, device_id: str) -> tuple[dict, list[str]]:
+        session = await self._http()
+        async with session.post(QR_STATUS_URL, json={"ticket": ticket}, headers=self._passport_headers(device_id)) as response:
+            raw = await response.text()
+            cookies = response.headers.getall("Set-Cookie", [])
+            try:
+                result = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError(f"二维码状态接口返回了非 JSON 内容（HTTP {response.status}）") from exc
+        return result, cookies
+
+    async def _complete_qr_cookie(self, cookie: str) -> str:
+        """Best-effort completion for QR responses that omit web login fields."""
+        stoken = cookie_value(cookie, "stoken", "stoken_v2")
+        if not stoken:
+            return cookie
+        completed = cookie
+        if not cookie_value(completed, "cookie_token", "cookie_token_v2"):
+            try:
+                result = await self._request("GET", COOKIE_TOKEN_URL, f"stoken={stoken}")
+                token = str((result.get("data") or {}).get("cookie_token") or "")
+                if result.get("retcode") == 0 and token:
+                    completed += f"; cookie_token={token}"
+            except Exception as exc:
+                logger.warning(f"米游社扫码：补全 cookie_token 失败：{exc}")
+        if not cookie_value(completed, "ltoken", "ltoken_v2"):
+            try:
+                mid = cookie_value(completed, "mid", "mid_v2", "account_mid_v2", "ltmid_v2")
+                result = await self._request("GET", LTOKEN_URL, f"stoken={stoken}; mid={mid}", params={"stoken": stoken})
+                token = str((result.get("data") or {}).get("ltoken") or (result.get("data") or {}).get("token") or "")
+                if result.get("retcode") == 0 and token:
+                    completed += f"; ltoken={token}"
+            except Exception as exc:
+                logger.warning(f"米游社扫码：补全 ltoken 失败：{exc}")
+        return clean_cookie(completed)
+
     async def _roles(self, cookie: str, game_biz: str) -> tuple[list[dict], str | None]:
         result = await self._request("GET", ROLES_URL, cookie, params={"game_biz": game_biz})
         if result.get("retcode") != 0:
@@ -237,6 +325,78 @@ class MiyousheMultiSignPlugin(Star):
         if not found:
             return "", {}, f"Cookie 未验证通过：{login_error or '未查询到任何游戏角色'}"
         return uid, found, None
+
+    async def _bind_cookie(self, sender: str, cookie: str, umo: str) -> tuple[str | None, str]:
+        """Validate and persist an account, shared by manual and QR binding."""
+        uid, roles, error = await self._validate_cookie(cookie)
+        if error:
+            return None, error
+        user = self._user(sender)
+        accounts = user["accounts"]
+        account = {"uid": uid, "cookie": cookie, "roles": roles, "bound_at": int(time.time())}
+        index = next((i for i, item in enumerate(accounts) if item.get("uid") == uid), None)
+        if index is None:
+            accounts.append(account)
+            index = len(accounts) - 1
+            action = "已新增"
+        else:
+            accounts[index] = account
+            action = "已更新"
+        user["active_index"] = index
+        user["umo"] = umo
+        await self.store.save()
+        games = "、".join(GAMES[biz]["name"] for biz in roles)
+        return uid, f"{action}账号 {uid}，识别到：{games}。自动签到结果将只推送到当前会话。"
+
+    async def _poll_qr_login(self, sender: str, ticket: str, device_id: str, umo: str, image_path: str, timeout: int) -> None:
+        """Wait for phone confirmation and bind the returned account in the background."""
+        last_status = ""
+        started = time.monotonic()
+        try:
+            while time.monotonic() - started < timeout:
+                await asyncio.sleep(3)
+                result, set_cookies = await self._query_qr_login(ticket, device_id)
+                retcode = result.get("retcode")
+                if retcode in {-3501, -3505}:
+                    await self.context.send_message(umo, MessageChain().message("二维码已失效或已取消，请重新发送 /mys扫码。"))
+                    return
+                if retcode != 0:
+                    logger.warning(f"米游社扫码状态查询失败：{result.get('message', retcode)}")
+                    continue
+                status = str((result.get("data") or {}).get("status") or "")
+                if status == "Scanned" and last_status != status:
+                    await self.context.send_message(umo, MessageChain().message("已扫码，请在米游社 App 中确认登录。"))
+                if status == "Confirmed":
+                    cookie = assemble_cookie(set_cookies)
+                    if not cookie:
+                        await self.context.send_message(umo, MessageChain().message("扫码确认成功，但未获取到登录 Cookie。请改用 /mys绑定 <完整 Cookie>。"))
+                        return
+                    cookie = await self._complete_qr_cookie(cookie)
+                    _, message = await self._bind_cookie(sender, cookie, umo)
+                    await self.context.send_message(umo, MessageChain().message(
+                        f"扫码绑定{'成功' if message.startswith('已') else '失败'}：{message}"
+                    ))
+                    return
+                last_status = status
+            await self.context.send_message(umo, MessageChain().message("扫码超时，请重新发送 /mys扫码。"))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(f"米游社扫码登录失败：{exc}")
+            try:
+                await self.context.send_message(umo, MessageChain().message(f"扫码登录失败：{exc}"))
+            except Exception:
+                pass
+        finally:
+            current = asyncio.current_task()
+            if self.qr_tasks.get(sender) is current:
+                self.qr_tasks.pop(sender, None)
+            try:
+                os.remove(image_path)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.debug(f"米游社扫码：清理二维码图片失败：{exc}")
 
     def _urls(self, game: dict[str, str]) -> tuple[str, str]:
         base = f"{game['api']}/event/{game['path']}"
@@ -302,6 +462,49 @@ class MiyousheMultiSignPlugin(Star):
                 lines.append(f"【{GAMES[biz]['name']}】请求异常：{exc}")
         return lines
 
+    @filter.command("米游社扫码", alias={"mys扫码"})
+    async def qr_bind(self, event: AstrMessageEvent):
+        """Create a MiHoYo App QR login and bind its account after confirmation."""
+        sender = self._sender(event)
+        task = self.qr_tasks.get(sender)
+        if task and not task.done():
+            yield event.plain_result("已有一个正在等待确认的二维码，请完成扫码或等待它超时。")
+            return
+        yield event.plain_result("正在生成米游社登录二维码…")
+        device_id = str(uuid.uuid4())
+        try:
+            url, ticket = await self._create_qr_login(device_id)
+        except Exception as exc:
+            logger.warning(f"米游社扫码：生成二维码失败：{exc}")
+            yield event.plain_result(f"生成二维码失败：{exc}")
+            return
+        try:
+            import qrcode
+
+            image_path = os.path.join(self.data_dir, f"qr_{uuid.uuid4().hex}.png")
+            image = qrcode.make(url)
+            image.save(image_path)
+        except Exception as exc:
+            if "image_path" in locals():
+                try:
+                    os.remove(image_path)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+            logger.warning(f"米游社扫码：生成二维码图片失败：{exc}")
+            yield event.plain_result(f"二维码图片生成失败：{exc}")
+            return
+        try:
+            timeout = max(30, min(int(self.config.get("qr_timeout", 120)), 300))
+        except (TypeError, ValueError):
+            timeout = 120
+        self.qr_tasks[sender] = asyncio.create_task(
+            self._poll_qr_login(sender, ticket, device_id, event.unified_msg_origin, image_path, timeout)
+        )
+        yield event.image_result(image_path)
+        yield event.plain_result(f"请使用米游社 App 扫描二维码，并在 App 内确认登录（{timeout} 秒内有效）。")
+
     @filter.command("米游社绑定", alias={"mys绑定"})
     async def bind(self, event: AstrMessageEvent):
         cookie = clean_cookie(self._argument(event, "绑定"))
@@ -309,27 +512,11 @@ class MiyousheMultiSignPlugin(Star):
             yield event.plain_result("用法：/mys绑定 <完整 Cookie>。请在私聊中执行，避免泄露账号凭据。")
             return
         yield event.plain_result("正在验证 Cookie 并绑定账号…")
-        uid, roles, error = await self._validate_cookie(cookie)
-        if error:
-            yield event.plain_result(f"绑定失败：{error}")
+        _, message = await self._bind_cookie(self._sender(event), cookie, event.unified_msg_origin)
+        if not message.startswith("已"):
+            yield event.plain_result(f"绑定失败：{message}")
             return
-        sender = self._sender(event)
-        user = self._user(sender)
-        accounts = user["accounts"]
-        account = {"uid": uid, "cookie": cookie, "roles": roles, "bound_at": int(time.time())}
-        index = next((i for i, item in enumerate(accounts) if item.get("uid") == uid), None)
-        if index is None:
-            accounts.append(account)
-            index = len(accounts) - 1
-            action = "已新增"
-        else:
-            accounts[index] = account
-            action = "已更新"
-        user["active_index"] = index
-        user["umo"] = event.unified_msg_origin
-        await self.store.save()
-        games = "、".join(GAMES[biz]["name"] for biz in roles)
-        yield event.plain_result(f"{action}账号 {uid}，识别到：{games}。自动签到结果将只推送到当前会话。")
+        yield event.plain_result(message)
 
     @filter.command("米游社签到", alias={"mys签到"})
     async def sign(self, event: AstrMessageEvent):

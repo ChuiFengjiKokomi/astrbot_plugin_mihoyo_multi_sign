@@ -1,8 +1,8 @@
 name: astrbot_plugin_mihoyo_multi_sign
 display_name: 米游社多用户签到
-desc: 面向 AstrBot 的米游社游戏每日签到插件。每位聊天用户独立绑定自己的米游社账号，支持多个账号、手动签到和自动推送。
-version: v1.0.0
+desc: 面向 AstrBot 的米游社游戏每日签到插件。每位聊天用户独立绑定自己的米游社账号，支持扫码或 Cookie 绑定、多个账号、手动签到和自动推送。
+version: v1.1.0
 author: Local
 repo: ""
-short_desc: 多用户隔离的米游社游戏每日签到
+short_desc: 多用户隔离的米游社游戏每日签到，支持扫码绑定
 astrbot_version: ">=4.12"
