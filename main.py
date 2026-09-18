@@ -100,6 +100,36 @@ def assemble_cookie(set_cookies: list[str]) -> str:
     return "; ".join(f"{key}={value}" for key, value in pairs.items())
 
 
+def enrich_qr_cookie(cookie: str, result: dict) -> str:
+    """Add App credentials returned in the QR status body when headers omit them."""
+    data = result.get("data") or {}
+    user_info = data.get("user_info") or data.get("userInfo") or {}
+    tokens = data.get("tokens") or data.get("token_list") or []
+    token = ""
+    if isinstance(tokens, list) and tokens:
+        first = tokens[0]
+        token = str(first.get("token") or "") if isinstance(first, dict) else str(first or "")
+    uid = str(
+        user_info.get("aid") or user_info.get("stuid") or user_info.get("uid")
+        or cookie_value(cookie, "stuid", "stuid_v2", "account_id", "account_id_v2", "ltuid", "ltuid_v2", "login_uid")
+    )
+    mid = str(user_info.get("mid") or cookie_value(cookie, "mid", "mid_v2", "account_mid_v2", "ltmid_v2"))
+    stoken = cookie_value(cookie, "stoken", "stoken_v2") or token
+    if not uid or not stoken:
+        return cookie
+    additions = {
+        "stuid": uid,
+        "stoken": stoken,
+    }
+    if mid:
+        additions["mid"] = mid
+    existing = {item.split("=", 1)[0].strip() for item in cookie.split(";") if "=" in item}
+    for key, value in additions.items():
+        if key not in existing:
+            cookie += f"; {key}={value}"
+    return clean_cookie(cookie)
+
+
 def ds_v1(salt: str) -> str:
     timestamp = str(int(time.time()))
     nonce = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
@@ -144,7 +174,7 @@ class UserStore:
                 logger.error(f"米游社签到：保存用户数据失败：{exc}")
 
 
-@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.2.0")
+@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.2.1")
 class MiyousheMultiSignPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -459,6 +489,7 @@ class MiyousheMultiSignPlugin(Star):
                     await self.context.send_message(umo, MessageChain().message("已扫码，请在米游社 App 中确认登录。"))
                 if status == "Confirmed":
                     cookie = assemble_cookie(set_cookies)
+                    cookie = enrich_qr_cookie(cookie, result)
                     if not cookie:
                         await self.context.send_message(umo, MessageChain().message("扫码确认成功，但未获取到登录 Cookie。请改用 /mys绑定 <完整 Cookie>。"))
                         return
