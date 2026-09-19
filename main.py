@@ -102,6 +102,11 @@ def assemble_cookie(set_cookies: list[str]) -> str:
 
 def enrich_qr_cookie(cookie: str, result: dict) -> str:
     """Add App credentials returned in the QR status body when headers omit them."""
+    pairs: dict[str, str] = {}
+    for item in clean_cookie(cookie).split(";"):
+        key, separator, value = item.strip().partition("=")
+        if separator:
+            pairs[key.strip()] = value.strip()
     data = result.get("data") or {}
     user_info = data.get("user_info") or data.get("userInfo") or {}
     tokens = data.get("tokens") or data.get("token_list") or []
@@ -114,20 +119,15 @@ def enrich_qr_cookie(cookie: str, result: dict) -> str:
         or cookie_value(cookie, "stuid", "stuid_v2", "account_id", "account_id_v2", "ltuid", "ltuid_v2", "login_uid")
     )
     mid = str(user_info.get("mid") or cookie_value(cookie, "mid", "mid_v2", "account_mid_v2", "ltmid_v2"))
-    stoken = cookie_value(cookie, "stoken", "stoken_v2") or token
+    stoken = token or cookie_value(cookie, "stoken", "stoken_v2")
     if not uid or not stoken:
-        return cookie
-    additions = {
-        "stuid": uid,
-        "stoken": stoken,
-    }
+        return clean_cookie(cookie)
+    # QR response body is authoritative; replace stale same-name values rather than append duplicates.
+    pairs["stuid"] = uid
+    pairs["stoken"] = stoken
     if mid:
-        additions["mid"] = mid
-    existing = {item.split("=", 1)[0].strip() for item in cookie.split(";") if "=" in item}
-    for key, value in additions.items():
-        if key not in existing:
-            cookie += f"; {key}={value}"
-    return clean_cookie(cookie)
+        pairs["mid"] = mid
+    return "; ".join(f"{key}={value}" for key, value in pairs.items())
 
 
 def ds_v1(salt: str) -> str:
@@ -174,7 +174,7 @@ class UserStore:
                 logger.error(f"米游社签到：保存用户数据失败：{exc}")
 
 
-@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.2.1")
+@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.2.2")
 class MiyousheMultiSignPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -245,7 +245,8 @@ class MiyousheMultiSignPlugin(Star):
     async def _http(self) -> aiohttp.ClientSession:
         if self.session is None or self.session.closed:
             timeout = aiohttp.ClientTimeout(total=25)
-            self.session = aiohttp.ClientSession(timeout=timeout)
+            # Never persist Set-Cookie values across users or QR login attempts.
+            self.session = aiohttp.ClientSession(timeout=timeout, cookie_jar=aiohttp.DummyCookieJar())
         return self.session
 
     def _headers(self, cookie: str, game: dict[str, str] | None = None) -> dict[str, str]:
