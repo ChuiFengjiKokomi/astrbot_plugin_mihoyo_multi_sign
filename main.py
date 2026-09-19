@@ -174,7 +174,7 @@ class UserStore:
                 logger.error(f"米游社签到：保存用户数据失败：{exc}")
 
 
-@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.2.2")
+@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.2.4")
 class MiyousheMultiSignPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -194,9 +194,16 @@ class MiyousheMultiSignPlugin(Star):
 
     @filter.on_astrbot_loaded()
     async def on_loaded(self):
+        await self._ensure_scheduler()
+        logger.info("米游社多用户签到插件已加载")
+
+    async def initialize(self):
+        """Start background jobs on both cold start and plugin hot reload."""
+        await self._ensure_scheduler()
+
+    async def _ensure_scheduler(self):
         if not self.schedule_task or self.schedule_task.done():
             self.schedule_task = asyncio.create_task(self._scheduler())
-        logger.info("米游社多用户签到插件已加载")
 
     async def terminate(self):
         if self.schedule_task:
@@ -742,19 +749,28 @@ class MiyousheMultiSignPlugin(Star):
 
     async def _scheduler(self):
         while True:
+            target = None
             try:
-                raw = str(self.config.get("sign_time", "09:00"))
-                hour, minute = (int(part) for part in raw.split(":", 1))
-                if not (0 <= hour <= 23 and 0 <= minute <= 59):
-                    raise ValueError
-            except (ValueError, TypeError):
-                hour, minute = 9, 0
-            now = datetime.now(BEIJING)
-            target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-            if target <= now:
-                target += timedelta(days=1)
-            try:
-                await asyncio.sleep((target - now).total_seconds())
+                # Recheck periodically so a WebUI sign_time change takes effect without reload.
+                while True:
+                    try:
+                        raw = str(self.config.get("sign_time", "09:00"))
+                        hour, minute = (int(part) for part in raw.split(":", 1))
+                        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                            raise ValueError
+                    except (ValueError, TypeError):
+                        hour, minute = 9, 0
+                    now = datetime.now(BEIJING)
+                    configured_target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if configured_target <= now:
+                        configured_target += timedelta(days=1)
+                    if target != configured_target:
+                        target = configured_target
+                        logger.info(f"米游社自动签到：下次执行时间 {target.strftime('%Y-%m-%d %H:%M:%S')}（北京时间）")
+                    remaining = (target - now).total_seconds()
+                    if remaining <= 0:
+                        break
+                    await asyncio.sleep(min(30, remaining))
                 await self._auto_sign_all()
             except asyncio.CancelledError:
                 raise
