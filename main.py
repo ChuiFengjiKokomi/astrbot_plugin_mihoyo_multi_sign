@@ -174,7 +174,7 @@ class UserStore:
                 logger.error(f"米游社签到：保存用户数据失败：{exc}")
 
 
-@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.2.4")
+@register("astrbot_plugin_mihoyo_multi_sign", "Local", "米游社多用户游戏每日签到", "v1.2.5")
 class MiyousheMultiSignPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -753,6 +753,9 @@ class MiyousheMultiSignPlugin(Star):
             try:
                 # Recheck periodically so a WebUI sign_time change takes effect without reload.
                 while True:
+                    now = datetime.now(BEIJING)
+                    if target is not None and now >= target:
+                        break
                     try:
                         raw = str(self.config.get("sign_time", "09:00"))
                         hour, minute = (int(part) for part in raw.split(":", 1))
@@ -760,7 +763,6 @@ class MiyousheMultiSignPlugin(Star):
                             raise ValueError
                     except (ValueError, TypeError):
                         hour, minute = 9, 0
-                    now = datetime.now(BEIJING)
                     configured_target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                     if configured_target <= now:
                         configured_target += timedelta(days=1)
